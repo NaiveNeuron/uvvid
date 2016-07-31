@@ -1,4 +1,5 @@
 import cv2 as cv
+
 import numpy as np
 
 
@@ -14,7 +15,7 @@ class UVVID:
         white_upper = np.array([255, 25, 255])
         return cv.inRange(hsv_frame, white_lower, white_upper)
 
-    def find_cursor(self, frame, template_frame, debug=True):
+    def find_cursor(self, frame, template_frame):
         hsv_frame = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
         mask = self.get_cursor_mask(hsv_frame)
 
@@ -27,34 +28,26 @@ class UVVID:
         min, max, min_loc, max_loc = cv.minMaxLoc(res)
         top_left = max_loc
 
-        bottom_right = (top_left[0] + template_frame.shape[0],
-                        top_left[1] + template_frame.shape[1])
-
         cursor_center = (top_left[0] + template_frame.shape[0]//2,
                          top_left[1] + template_frame.shape[1]//2)
-
-        if debug:
-            cv.rectangle(frame, top_left, bottom_right,
-                         (255, 255, 255), 1)
 
         return cursor_center
 
     def is_cursor_drawing(self, frame, prev_frame, cursor_coord, window=10,
-                          min_drawing_pixels=0.2, debug=True):
+                          min_drawing_pixels=0.2):
         x, y = cursor_coord
-        x_min = np.clip(x-window, 0, frame.shape[0])
-        x_max = np.clip(x+window, 0, frame.shape[0])
-        y_min = np.clip(y-window, 0, frame.shape[1])
-        y_max = np.clip(y+window, 0, frame.shape[1])
+        # shape[1] is width of the frame
+        x_min = np.clip(x-window, 0, frame.shape[1])
+        x_max = np.clip(x+window, 0, frame.shape[1])
+        # shape[0] is height of the frame
+        y_min = np.clip(y-window, 0, frame.shape[0])
+        y_max = np.clip(y+window, 0, frame.shape[0])
+
         selection = frame[y_min:y_max, x_min:x_max]
         prev_selection = prev_frame[y_min:y_max, x_min:x_max]
 
         hsv_selection = cv.cvtColor(selection, cv.COLOR_BGR2HSV)
         hsv_prev_selection = cv.cvtColor(prev_selection, cv.COLOR_BGR2HSV)
-        # Temporary fix for error coused by x_min and x_max having same value
-        # so shape is (X, 0, X) which couses cvtColor return None
-        if hsv_selection is None or hsv_prev_selection is None:
-            return None, None
 
         black = np.zeros((selection.shape[0], selection.shape[1], 3), np.uint8)
 
@@ -80,13 +73,6 @@ class UVVID:
 
         color_val = np.max(diff.reshape(-1, 3), axis=0).reshape((1, 1, 3))
         color = tuple(color_val[0][0].astype('int'))
-
-        if debug:
-            ds = "Drawing" if drawing else "Idle"
-            cv.rectangle(frame, (frame.shape[1] - 60, 20),
-                                (frame.shape[1] - 40, 40), color, -1)
-            cv.putText(frame, ds, (frame.shape[1] - 150, 40),
-                       cv.FONT_HERSHEY_TRIPLEX, 0.6, (255, 255, 255), 1)
 
         return drawing, color
 
