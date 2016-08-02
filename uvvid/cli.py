@@ -35,6 +35,7 @@ def view(ctx, cursor, video):
 
         if prev_frame is not None:
             drawing, color = uvvid.is_cursor_drawing(frame, prev_frame, coord)
+            uvvid.generate_strokes(frame, prev_frame, template_frame)
             if debug:
                 top_left = (coord[0] - template_frame.shape[0]//2,
                             coord[1] - template_frame.shape[1]//2)
@@ -51,3 +52,7 @@ def view(ctx, cursor, video):
         prev_frame = frame
         if cv.waitKey(1) & 0xFF == ord('q'):
             break
+
+    uvvid.__debug_points__(prev_frame, uvvid.get_strokes())
+    cv.imshow('debug points', prev_frame)
+    cv.waitKey(0)
