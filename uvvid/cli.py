@@ -43,8 +43,8 @@ def view(ctx, cursor, video):
                                 coord[1] + template_frame.shape[1]//2)
                 cv.rectangle(frame, top_left, bottom_right, (255, 255, 255), 1)
                 ds = "Drawing" if drawing else "Idle"
-                cv.rectangle(frame, (frame.shape[1] - 60, 20),
-                                    (frame.shape[1] - 40, 40), color, -1)
+                # cv.rectangle(frame, (frame.shape[1] - 60, 20),
+                #                     (frame.shape[1] - 40, 40), color, -1)
                 cv.putText(frame, ds, (frame.shape[1] - 150, 40),
                            cv.FONT_HERSHEY_TRIPLEX, 0.6, (255, 255, 255), 1)
 
