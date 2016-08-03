@@ -13,7 +13,8 @@ class UVVID:
         self.idle_positions = []
         self.colors = []
         self.frame_time_diff = 1
-        self.nodraw_frame = None
+        self.before_frame = None
+        self.old_frame = None
 
     def get_cursor_mask(self, hsv_frame):
         # Clear everything that is not white from the gray image. This should
@@ -40,15 +41,18 @@ class UVVID:
 
         return cursor_center
 
-    def remove_cursor(self, frame1, frame2, ker=(3, 3)):
+    def remove_cursor(self, frame1, frame2=None, ker=(3, 3)):
         # Invert masks to filter out everything that is either the cursor or
         # the blackboard
         black = np.zeros((frame1.shape[0], frame1.shape[1], 3), np.uint8)
         mask = 255 - self.get_cursor_mask(frame1)
-        prev_mask = 255 - self.get_cursor_mask(frame2)
         selection = cv.bitwise_or(frame1, black, mask=mask)
-        prev_selection = cv.bitwise_or(frame2, black, mask=prev_mask)
-        diff = cv.absdiff(selection, prev_selection)
+        if frame2 is not None:
+            prev_mask = 255 - self.get_cursor_mask(frame2)
+            prev_selection = cv.bitwise_or(frame2, black, mask=prev_mask)
+            diff = cv.absdiff(selection, prev_selection)
+        else:
+            diff = selection
         kernel = np.ones(ker, np.uint8)
         diff = cv.erode(diff, kernel, iterations=1)
         diff = cv.dilate(diff, kernel, iterations=1)
@@ -92,22 +96,23 @@ class UVVID:
             return (math.degrees(theta) + 360) % 360
         return theta
 
-    def __add_points(self, cursor, frame, template_frame):
-        last_x, last_y = self.idle_positions[-1]
-        x, y = cursor
-        temp_width, temp_height = template_frame.shape
-        x_max, x_min = max(last_x, x)+10, min(last_x, x)-10
-        y_max, y_min = max(last_y, y)+10, min(last_y, y)-10
-        selection = frame[y_min:y_max, x_min:x_max]
-        nodraw_selection = self.nodraw_frame[y_min:y_max, x_min:x_max]
-        selection = cv.cvtColor(selection, cv.COLOR_BGR2HSV)
-        nodraw_selection = cv.cvtColor(nodraw_selection, cv.COLOR_BGR2HSV)
-        diff = self.remove_cursor(selection, nodraw_selection)
-        diff = cv.split(diff)[2]
-        _, reshaped = cv.threshold(diff, 3, 255, cv.THRESH_BINARY)
-        points = np.transpose(np.nonzero(diff))
-        for point in points:
-            self.strokes[-1].append((x_min + point[1], y_min + point[0]))
+    def __add_points(self, cursor, frame, before_frame):
+        diff = cv.absdiff(frame, before_frame)
+        diff = self.remove_cursor(diff)
+        diff = cv.split(cv.cvtColor(diff, cv.COLOR_BGR2HSV))[2]
+        _, diff = cv.threshold(diff, 50, 255, cv.THRESH_BINARY)
+        cnts, _ = cv.findContours(diff, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
+        cnts = sorted(cnts, key=cv.contourArea, reverse=True)[:2]
+        for cnt in cnts:
+            point = cnt[0][0]
+            self.strokes.append([(point[0], point[1])])
+            for cnt_point in cnt:
+                cx, cy = cnt_point[0]
+                px, py = point
+                if px-3 <= cx <= px+3 and py-3 <= cy <= py+3:
+                    continue
+                self.strokes[-1].append((cx, cy))
+                point = cnt_point[0]
 
     def generate_strokes(self, frame, prev_frame, template_frame,
                          frame_diff=3, diff_degree=5):
@@ -117,21 +122,14 @@ class UVVID:
                                                        prev_frame,
                                                        cursor)
         if is_drawing:
-            if self.frame_time_diff < frame_diff:
-                current_shape = self.strokes[-1]
-                current_shape.append(cursor)
-                self.nodraw_frame = frame
-            else:
-                self.colors.append(color)
-                self.strokes.append([cursor])
-                self.__add_points(cursor, frame, template_frame)
+            if self.frame_time_diff > frame_diff:
+                self.before_frame = self.old_frame
             self.frame_time_diff = 0
         else:
-            if self.frame_time_diff <= 1 and self.nodraw_frame is not None:
-                self.__add_points(cursor, frame, template_frame)
-            self.idle_positions.append(cursor)
+            if self.frame_time_diff == 2 and self.before_frame is not None:
+                self.__add_points(cursor, frame, self.before_frame)
             self.frame_time_diff += 1
-            self.nodraw_frame = frame
+        self.old_frame = prev_frame
 
     def get_strokes(self):
         return self.strokes
