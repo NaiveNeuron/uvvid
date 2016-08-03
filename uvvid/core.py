@@ -13,7 +13,7 @@ class UVVID:
         self.idle_positions = []
         self.colors = []
         self.frame_time_diff = 0
-        self.cursor_coord = (0, 0)
+        self.nodraw_frame = None
 
     def get_cursor_mask(self, hsv_frame):
         # Clear everything that is not white from the gray image. This should
@@ -40,6 +40,20 @@ class UVVID:
 
         return cursor_center
 
+    def remove_cursor(self, frame1, frame2, ker=(3, 3)):
+        # Invert masks to filter out everything that is either the cursor or
+        # the blackboard
+        black = np.zeros((frame1.shape[0], frame2.shape[1], 3), np.uint8)
+        mask = 255 - self.get_cursor_mask(frame1)
+        prev_mask = 255 - self.get_cursor_mask(frame2)
+        selection = cv.bitwise_or(frame1, black, mask=mask)
+        prev_selection = cv.bitwise_or(frame2, black, mask=prev_mask)
+        diff = cv.absdiff(selection, prev_selection)
+        kernel = np.ones(ker, np.uint8)
+        diff = cv.erode(diff, kernel, iterations=1)
+        diff = cv.dilate(diff, kernel, iterations=1)
+        return diff
+
     def is_cursor_drawing(self, frame, prev_frame, cursor_coord, window=10,
                           min_drawing_pixels=0.2):
         x, y = cursor_coord
@@ -56,18 +70,7 @@ class UVVID:
         hsv_selection = cv.cvtColor(selection, cv.COLOR_BGR2HSV)
         hsv_prev_selection = cv.cvtColor(prev_selection, cv.COLOR_BGR2HSV)
 
-        black = np.zeros((selection.shape[0], selection.shape[1], 3), np.uint8)
-
-        # Invert masks to filter out everything that is either the cursor or
-        # the blackboard
-        mask = 255 - self.get_cursor_mask(hsv_selection)
-        prev_mask = 255 - self.get_cursor_mask(hsv_prev_selection)
-        selection = cv.bitwise_or(selection, black, mask=mask)
-        prev_selection = cv.bitwise_or(prev_selection, black, mask=prev_mask)
-        diff = cv.absdiff(selection, prev_selection)
-        kernel = np.ones((3, 3), np.uint8)
-        diff = cv.erode(diff, kernel, iterations=1)
-        diff = cv.dilate(diff, kernel, iterations=1)
+        diff = self.remove_cursor(hsv_selection, hsv_prev_selection)
         reshaped = diff[:, :, 2].reshape(-1)
 
         # Threshold residue from all the masking and eroding
@@ -89,6 +92,25 @@ class UVVID:
             return (math.degrees(theta) + 360) % 360
         return theta
 
+    def __add_points(self, cursor, frame, template_frame):
+        last_x, last_y = self.idle_positions[-1]
+        x, y = cursor
+        temp_width, temp_height = template_frame.shape
+        x_max, x_min = max(last_x, x)+2, min(last_x, x)-2
+        y_max, y_min = max(last_y, y)+2, min(last_y, y)-2
+        selection = frame[y_min:y_max, x_min:x_max]
+        nodraw_selection = self.nodraw_frame[y_min:y_max, x_min:x_max]
+        selection = cv.cvtColor(selection, cv.COLOR_BGR2HSV)
+        nodraw_selection = cv.cvtColor(nodraw_selection, cv.COLOR_BGR2HSV)
+        diff = self.remove_cursor(selection, nodraw_selection, ker=(2, 2))
+        diff = cv.split(diff)[2]
+        _, reshaped = cv.threshold(diff, 3, 255, cv.THRESH_BINARY)
+        points = np.transpose(np.nonzero(diff))
+        for point in points:
+            self.strokes[-1].append((x_min + point[1], y_min + point[0]))
+
+    switch_flag = False
+
     def generate_strokes(self, frame, prev_frame, template_frame,
                          frame_diff=3, diff_degree=5):
         cursor = self.find_cursor(frame, template_frame)
@@ -98,22 +120,24 @@ class UVVID:
                                                        cursor)
         if is_drawing:
             if self.frame_time_diff < frame_diff:
+                if self.switch_flag:
+                    self.__add_points(cursor, frame, template_frame)
+                    self.switch_flag = False
                 current_shape = self.strokes[-1]
-                # degree = self.__get_angle(cursor, current_shape[-1])
-                # if degree >= diff_degree:
                 current_shape.append(cursor)
+                self.nodraw_frame = frame
             else:
                 self.colors.append(color)
                 self.strokes.append([cursor])
+                self.__add_points(cursor, frame, template_frame)
+                self.switch_flag = True
             self.frame_time_diff = 0
         else:
-            if len(self.idle_positions) <= 0:
-                self.idle_positions.append(cursor)
-            else:
-                degree = self.__get_angle(cursor, self.idle_positions[-1])
-                if degree >= diff_degree:
-                    self.idle_positions.append(cursor)
+            if self.frame_time_diff <= 1 and self.nodraw_frame is not None:
+                self.__add_points(cursor, frame, template_frame)
+            self.idle_positions.append(cursor)
             self.frame_time_diff += 1
+            self.nodraw_frame = frame
 
     def get_strokes(self):
         return self.strokes
@@ -123,8 +147,8 @@ class UVVID:
 
     def __debug_points__(self, frame, points):
         '''
-        Debug function to vizualize where are points
-        found cursor points localted
+        Debug function to vizualize where are found
+        cursor points located
 
         Args:
             frame - frame where to visualize the points (Warning: this will
