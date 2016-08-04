@@ -8,13 +8,14 @@ import numpy as np
 class UVVID:
 
     def __init__(self):
-        self.prev_cursor_position = (None, None)
         self.strokes = []
-        self.idle_positions = []
+        self.idle_cursors = []
+        self.cursor_points = []
         self.colors = []
         self.frame_time_diff = 1
         self.before_frame = None
         self.old_frame = None
+        self.drawing_points = []
 
     def get_cursor_mask(self, hsv_frame):
         # Clear everything that is not white from the gray image. This should
@@ -96,16 +97,21 @@ class UVVID:
             return (math.degrees(theta) + 360) % 360
         return theta
 
-    def __add_points(self, cursor, frame, before_frame):
+    def __add_points(self, cursor_points, frame, before_frame):
         diff = cv.absdiff(frame, before_frame)
         diff = self.remove_cursor(diff)
         diff = cv.split(cv.cvtColor(diff, cv.COLOR_BGR2HSV))[2]
         _, diff = cv.threshold(diff, 50, 255, cv.THRESH_BINARY)
         cnts, _ = cv.findContours(diff, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
         cnts = sorted(cnts, key=cv.contourArea, reverse=True)[:2]
+        if len(cnts) <= 0:
+            return False
+        self.drawing_points.append(cursor_points)
+        # add new shape to list of strokes
+        self.strokes.append([])
         for cnt in cnts:
             point = cnt[0][0]
-            self.strokes.append([(point[0], point[1])])
+            self.strokes[-1].append((point[0], point[1]))
             for cnt_point in cnt:
                 cx, cy = cnt_point[0]
                 px, py = point
@@ -113,10 +119,12 @@ class UVVID:
                     continue
                 self.strokes[-1].append((cx, cy))
                 point = cnt_point[0]
+        return True
 
     def generate_strokes(self, frame, prev_frame, template_frame,
                          frame_diff=3, diff_degree=5):
         cursor = self.find_cursor(frame, template_frame)
+        self.idle_cursors.append(cursor)
         if prev_frame is not None:
             is_drawing, color = self.is_cursor_drawing(frame,
                                                        prev_frame,
@@ -124,10 +132,20 @@ class UVVID:
         if is_drawing:
             if self.frame_time_diff > frame_diff:
                 self.before_frame = self.old_frame
+                # start with first cursor position before we started to draw
+                pos = self.idle_cursors.pop()
+                # append last 2 positions of the cursor
+                self.cursor_points.append([self.idle_cursors.pop(-2), pos])
             self.frame_time_diff = 0
+            self.cursor_points[-1].append(cursor)
         else:
             if self.frame_time_diff == 2 and self.before_frame is not None:
-                self.__add_points(cursor, frame, self.before_frame)
+                found_conture = self.__add_points(self.cursor_points[-1],
+                                                  frame,
+                                                  self.before_frame)
+                # add last cursor position after drawing
+                if found_conture:
+                    self.cursor_points[-1].append(self.idle_cursors.pop(-3))
             self.frame_time_diff += 1
         self.old_frame = prev_frame
 
@@ -137,7 +155,7 @@ class UVVID:
     def get_idle_cursor_positions(self):
         return self.idle_positions
 
-    def __debug_points__(self, frame, points):
+    def __debug_points__(self, frame, points, show_cursor_points=False):
         '''
         Debug function to vizualize where are found
         cursor points located
@@ -151,9 +169,13 @@ class UVVID:
             arr_shape = np.asarray(shape).swapaxes(0, 1)
             min_x, min_y = np.min(arr_shape[0]), np.min(arr_shape[1])
             max_x, max_y = np.max(arr_shape[0]), np.max(arr_shape[1])
-            cv.rectangle(frame, (min_x, min_y), (max_x, max_y), (255, 0, 0), 1)
+            cv.rectangle(frame, (min_x, min_y), (max_x, max_y),
+                         (255, 255, 255), 1)
             for point in shape:
-                cv.circle(frame, tuple(point), 3, (0, 0, 255), -1)
+                cv.circle(frame, tuple(point), 2, (0, 0, 255), -1)
+            if show_cursor_points:
+                for cursor_point in self.drawing_points[i]:
+                    cv.circle(frame, cursor_point, 3, (255, 0, 0), -1)
 
     def generate_json(self):
         pass
