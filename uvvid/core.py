@@ -1,7 +1,4 @@
-import math
-
 import cv2 as cv
-
 import numpy as np
 
 
@@ -14,8 +11,9 @@ class UVVID:
         self.colors = []
         self.frame_time_diff = 1
         self.before_frame = None
+        self.before_cursor = None
         self.old_frame = None
-        self.drawing_points = []
+        self.threshold = 50
 
     def get_cursor_mask(self, hsv_frame):
         # Clear everything that is not white from the gray image. This should
@@ -89,37 +87,105 @@ class UVVID:
 
         return drawing, color
 
-    def __get_angle(self, new_point, last_point, in_degrees=True):
-        new_x, new_y = new_point
-        last_x, last_y = last_point
-        theta = math.atan2(new_y - last_y, new_x - last_y)
-        if in_degrees:
-            return (math.degrees(theta) + 360) % 360
-        return theta
+    def closest_node(self, point, nodes):
+        if nodes.size == 0:
+            return None, None
+        deltas = nodes - point
+        dist_2 = np.einsum('ij,ij->i', deltas, deltas)
+        return np.argmin(dist_2), dist_2
 
-    def __add_points(self, cursor_points, frame, before_frame):
-        diff = cv.absdiff(frame, before_frame)
-        diff = self.remove_cursor(diff)
+    def closest_nodes(self, points, nodes):
+        points = np.asarray(points)
+        deltas = nodes[:, np.newaxis, :] - points[:]
+        dist_2 = np.einsum('xij,xij->xi', deltas, deltas)
+        return np.argmin(dist_2, axis=0), dist_2
+
+    def get_conture_points(self, frame, before_frame):
+        diff = self.remove_cursor(frame, before_frame)
         diff = cv.split(cv.cvtColor(diff, cv.COLOR_BGR2HSV))[2]
-        _, diff = cv.threshold(diff, 50, 255, cv.THRESH_BINARY)
-        cnts, _ = cv.findContours(diff, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
+        _, diff = cv.threshold(diff, 10, 255, cv.THRESH_BINARY)
+        cnts, _ = cv.findContours(diff, cv.RETR_LIST, cv.CHAIN_APPROX_NONE)
         cnts = sorted(cnts, key=cv.contourArea, reverse=True)[:2]
         if len(cnts) <= 0:
-            return False
-        self.drawing_points.append(cursor_points)
+            return None
+        return cnts
+
+    def __insert_point__(self, arr, idx, point, frame):
+        after_idx = idx+1 if idx+1 < len(arr) else idx
+        before_idx = idx-1 if idx-1 >= 0 else idx
+        after = arr[after_idx]
+        before = arr[before_idx]
+        _, dist1 = self.closest_nodes(np.asarray([point]),
+                                      np.asarray([before, arr[idx], after]))
+        _, dist2 = self.closest_nodes(np.asarray([arr[idx]]),
+                                      np.asarray([before, point, after]))
+        if dist2[1] <= self.threshold or min(dist1) >= 1000:
+            return arr
+        before_dist = dist1[0] + dist2[1] + dist2[2]
+        after_dist = dist1[2] + dist2[1] + dist2[0]
+
+        if idx == before_idx:
+            before_dist -= dist1[0]
+        elif idx == after_idx:
+            after_dist -= dist1[2]
+
+        if before_dist > after_dist:
+            idx += 1
+        return np.insert(arr, idx, point, axis=0)
+
+    def __debug_sort__(self, points, frame):
+        debug = frame.copy()
+        for point in points:
+            cv.circle(debug, tuple(point), 2, (255, 0, 255), -1)
+            cv.imshow('debug sort', debug)
+            cv.waitKey(0)
+
+    def __add_points(self, cursor_points, cnts, frame):
+        if len(cnts) == 1:
+            conture_points = np.squeeze(cnts[0])
+        else:
+            conture_points = np.concatenate((np.squeeze(cnts[0]),
+                                             np.squeeze(cnts[1])))
+        if cv.contourArea(conture_points) <= 40:
+            return
+
+        num_points = int(conture_points.shape[0] / 10)
+        num_points = num_points if num_points <= 5 else 5
+        num_points = 2 if num_points <= 2 else num_points
+
+        closest_idx, dist = self.closest_nodes(cursor_points, conture_points)
+        dist_idx = np.argsort(np.swapaxes(dist, 0, 1), axis=1)[:, :num_points]
+        closest_points = conture_points[closest_idx]
+        conture_points = np.delete(conture_points, dist_idx.flatten(), axis=0)
+
+        _, test_dist = self.closest_nodes(closest_points, closest_points)
+        tmp = test_dist > 100
+        cursor_dist = test_dist * tmp
+        for i, c_dist in enumerate(cursor_dist):
+            a = np.asarray(np.nonzero(c_dist == 0))
+            remove = a[np.nonzero(a * (a != i))]
+            if remove.size != 0:
+                closest_points = np.delete(closest_points, remove, axis=0)
+
+        for i, point in enumerate(conture_points):
+            closest_idx, dist = self.closest_node(point, conture_points)
+            dist_idx = np.argsort(dist)[:num_points]
+            if max(dist) > self.threshold:
+                clst_idx, _ = self.closest_node(point, closest_points)
+                closest_points = self.__insert_point__(closest_points,
+                                                       clst_idx, point, frame)
+                continue
+            mean = np.mean(conture_points[dist_idx], axis=0)
+            mean = [int(mean[0]), int(mean[1])]
+            _, mean_dist = self.closest_node(mean, np.asarray(closest_points))
+
+            if mean_dist is None or min(mean_dist) > self.threshold:
+                clst_idx, _ = self.closest_node(mean, closest_points)
+                closest_points = self.__insert_point__(closest_points,
+                                                       clst_idx, mean, frame)
+        self.__debug_sort__(closest_points, frame)
         # add new shape to list of strokes
-        self.strokes.append([])
-        for cnt in cnts:
-            point = cnt[0][0]
-            self.strokes[-1].append((point[0], point[1]))
-            for cnt_point in cnt:
-                cx, cy = cnt_point[0]
-                px, py = point
-                if px-3 <= cx <= px+3 and py-3 <= cy <= py+3:
-                    continue
-                self.strokes[-1].append((cx, cy))
-                point = cnt_point[0]
-        return True
+        self.strokes.append(closest_points)
 
     def generate_strokes(self, frame, prev_frame, template_frame,
                          frame_diff=3, diff_degree=5):
@@ -133,20 +199,21 @@ class UVVID:
             if self.frame_time_diff > frame_diff:
                 self.before_frame = self.old_frame
                 # start with first cursor position before we started to draw
-                pos = self.idle_cursors.pop()
-                # append last 2 positions of the cursor
-                self.cursor_points.append([self.idle_cursors.pop(-2), pos])
+                self.cursor_points.append([self.idle_cursors.pop()])
             self.frame_time_diff = 0
             self.cursor_points[-1].append(cursor)
         else:
             if self.frame_time_diff == 2 and self.before_frame is not None:
-                found_conture = self.__add_points(self.cursor_points[-1],
-                                                  frame,
-                                                  self.before_frame)
+                found_conture = self.get_conture_points(frame,
+                                                        self.before_frame)
                 # add last cursor position after drawing
-                if found_conture:
+                if found_conture is not None:
                     self.cursor_points[-1].append(self.idle_cursors.pop(-3))
+                    self.__add_points(self.cursor_points[-1], found_conture,
+                                      frame)
+
             self.frame_time_diff += 1
+        self.old_cursor = cursor
         self.old_frame = prev_frame
 
     def get_strokes(self):
@@ -155,7 +222,7 @@ class UVVID:
     def get_idle_cursor_positions(self):
         return self.idle_positions
 
-    def __debug_points__(self, frame, points, show_cursor_points=False):
+    def __debug_points__(self, frame, points):
         '''
         Debug function to vizualize where are found
         cursor points located
@@ -166,16 +233,16 @@ class UVVID:
             points - array of points to vizualize
         '''
         for i, shape in enumerate(points):
-            arr_shape = np.asarray(shape).swapaxes(0, 1)
+            arr_shape = np.asarray(shape)
+            if arr_shape.size == 0:
+                continue
+            arr_shape = arr_shape.swapaxes(0, 1)
             min_x, min_y = np.min(arr_shape[0]), np.min(arr_shape[1])
             max_x, max_y = np.max(arr_shape[0]), np.max(arr_shape[1])
             cv.rectangle(frame, (min_x, min_y), (max_x, max_y),
                          (255, 255, 255), 1)
             for point in shape:
                 cv.circle(frame, tuple(point), 2, (0, 0, 255), -1)
-            if show_cursor_points:
-                for cursor_point in self.drawing_points[i]:
-                    cv.circle(frame, cursor_point, 3, (255, 0, 0), -1)
 
     def generate_json(self):
         pass

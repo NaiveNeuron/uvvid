@@ -39,7 +39,6 @@ def view(ctx, cursor, video):
         if cv.waitKey(1) & 0xFF == ord('q'):
             break
     if debug:
-        uvvid.__debug_points__(prev_frame, uvvid.get_strokes(),
-                               show_cursor_points=True)
+        uvvid.__debug_points__(prev_frame, uvvid.get_strokes())
         cv.imshow('debug points', prev_frame)
     cv.waitKey(0)
