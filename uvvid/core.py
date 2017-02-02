@@ -1,19 +1,21 @@
 import cv2 as cv
 import numpy as np
+import json as js
+import sys
 
 
 class UVVID:
 
-    def __init__(self):
+    def __init__(self, drawing_window=None, drawing_ratio=None):
         self.strokes = []
-        self.idle_cursors = []
         self.cursor_points = []
         self.colors = []
+        self.timestamps = []
         self.frame_time_diff = 1
-        self.before_frame = None
-        self.before_cursor = None
         self.old_frame = None
         self.threshold = 50
+        self.drawing_window = drawing_window
+        self.drawing_ratio = drawing_ratio
 
     def get_cursor_mask(self, hsv_frame):
         # Clear everything that is not white from the gray image. This should
@@ -57,6 +59,12 @@ class UVVID:
         diff = cv.dilate(diff, kernel, iterations=1)
         return diff
 
+    def get_stroke_color(self, frame, window):
+        y_min, y_max, x_min, x_max = window
+        color_sec = self.remove_cursor(frame[y_min:y_max, x_min:x_max])
+        color_val = np.max(color_sec.reshape(-1, 3), axis=0).astype('uint8')
+        return map(int, reversed(color_val))
+
     def is_cursor_drawing(self, frame, prev_frame, cursor_coord, window=10,
                           min_drawing_pixels=0.2):
         x, y = cursor_coord
@@ -81,10 +89,7 @@ class UVVID:
                                            cv.THRESH_BINARY)[1], (-1))
         nonzero = np.count_nonzero(reshaped)
         drawing = nonzero >= (window+1)**2 * min_drawing_pixels
-
-        color_val = np.max(diff.reshape(-1, 3), axis=0).reshape((1, 1, 3))
-        color = tuple(color_val[0][0].astype('int'))
-
+        color = self.get_stroke_color(frame, (y_min, y_max, x_min, x_max))
         return drawing, color
 
     def closest_node(self, point, nodes):
@@ -133,21 +138,20 @@ class UVVID:
             idx += 1
         return np.insert(arr, idx, point, axis=0)
 
-    def __debug_sort__(self, points, frame):
+    def __debug_sort__(self, points, frame, stop=True):
         debug = frame.copy()
         for point in points:
             cv.circle(debug, tuple(point), 2, (255, 0, 255), -1)
             cv.imshow('debug sort', debug)
-            cv.waitKey(0)
+            if stop is True:
+                cv.waitKey(0)
 
-    def __add_points(self, cursor_points, cnts, frame):
+    def __add_points__(self, cursor_points, cnts, frame, prev_frame):
         if len(cnts) == 1:
             conture_points = np.squeeze(cnts[0])
         else:
             conture_points = np.concatenate((np.squeeze(cnts[0]),
                                              np.squeeze(cnts[1])))
-        if cv.contourArea(conture_points) <= 40:
-            return
 
         num_points = int(conture_points.shape[0] / 10)
         num_points = num_points if num_points <= 5 else 5
@@ -183,44 +187,60 @@ class UVVID:
                 clst_idx, _ = self.closest_node(mean, closest_points)
                 closest_points = self.__insert_point__(closest_points,
                                                        clst_idx, mean, frame)
-        self.__debug_sort__(closest_points, frame)
-        # add new shape to list of strokes
-        self.strokes.append(closest_points)
+        # add new stroke to last shape
+        self.strokes[-1].extend(closest_points.tolist())
 
     def generate_strokes(self, frame, prev_frame, template_frame,
-                         frame_diff=3, diff_degree=5):
+                         timestamp):
         cursor = self.find_cursor(frame, template_frame)
-        self.idle_cursors.append(cursor)
+        self.cursor_points.append(cursor)
         if prev_frame is not None:
             is_drawing, color = self.is_cursor_drawing(frame,
                                                        prev_frame,
-                                                       cursor)
+                                                       cursor,
+                                                       window=self.drawing_window,
+                                                       min_drawing_pixels=self.drawing_ratio)
         if is_drawing:
-            if self.frame_time_diff > frame_diff:
-                self.before_frame = self.old_frame
-                # start with first cursor position before we started to draw
-                self.cursor_points.append([self.idle_cursors.pop()])
-            self.frame_time_diff = 0
-            self.cursor_points[-1].append(cursor)
-        else:
-            if self.frame_time_diff == 2 and self.before_frame is not None:
-                found_conture = self.get_conture_points(frame,
-                                                        self.before_frame)
-                # add last cursor position after drawing
+            if self.frame_time_diff > 2:
+                found_conture = self.get_conture_points(prev_frame,
+                                                        self.old_frame)
+                self.colors.append(color)
+                self.timestamps.append({"start": round(timestamp/1000.0, 1)})
                 if found_conture is not None:
-                    self.cursor_points[-1].append(self.idle_cursors.pop(-3))
-                    self.__add_points(self.cursor_points[-1], found_conture,
-                                      frame)
+                    self.__add_points__(self.old_cursor, found_conture,
+                                        prev_frame, self.old_frame)
 
+            found_conture = self.get_conture_points(frame, prev_frame)
+            if found_conture is not None:
+                self.__add_points__(cursor, found_conture, frame, prev_frame)
+            self.frame_time_diff = 0
+        else:
+            if self.frame_time_diff < 2:
+                found_conture = self.get_conture_points(frame, prev_frame)
+                if found_conture is not None:
+                    self.__add_points__(cursor, found_conture,
+                                        frame, prev_frame)
+            if self.frame_time_diff == 2:
+                if len(self.timestamps) != 0:
+                    self.timestamps[-1]["end"] = round(timestamp/1000.0, 1)
+                # add new shape to list of strokes
+                self.strokes.append([])
             self.frame_time_diff += 1
-        self.old_cursor = cursor
         self.old_frame = prev_frame
+        self.old_cursor = cursor
 
     def get_strokes(self):
         return self.strokes
 
-    def get_idle_cursor_positions(self):
-        return self.idle_positions
+    def get_cursor_positions(self):
+        return self.cursor_points
+
+    def get_bounding_box(self, shape):
+        min_x, min_y, max_x, max_y = sys.maxint, sys.maxint, 0, 0
+        arr_shape = np.asarray(shape).swapaxes(0, 1)
+        min_x, min_y = np.min(arr_shape[0]), np.min(arr_shape[1])
+        max_x, max_y = np.max(arr_shape[0]), np.max(arr_shape[1])
+        return min_x, min_y, max_x, max_y
 
     def __debug_points__(self, frame, points):
         '''
@@ -233,16 +253,45 @@ class UVVID:
             points - array of points to vizualize
         '''
         for i, shape in enumerate(points):
-            arr_shape = np.asarray(shape)
-            if arr_shape.size == 0:
+            if len(shape) == 0:
                 continue
-            arr_shape = arr_shape.swapaxes(0, 1)
-            min_x, min_y = np.min(arr_shape[0]), np.min(arr_shape[1])
-            max_x, max_y = np.max(arr_shape[0]), np.max(arr_shape[1])
+            min_x, min_y, max_x, max_y = frame.shape[1], frame.shape[0], 0, 0
+            # find coords for minimum bounding rectangle for a shape
+            min_x, min_y, max_x, max_y = self.get_bouding_box(shape)
+            for point in shape:
+                # draw stroke points
+                cv.circle(frame, tuple(point), 2, (0, 0, 255), -1)
+            # draw minimum bounding rectangle
             cv.rectangle(frame, (min_x, min_y), (max_x, max_y),
                          (255, 255, 255), 1)
-            for point in shape:
-                cv.circle(frame, tuple(point), 2, (0, 0, 255), -1)
 
-    def generate_json(self):
-        pass
+    def generate_json(self, filename, cursor_name, interpolation, audio_file,
+                      background, cursor_offset, fps, total_time):
+        # video metadata
+        output = {"cursor": self.cursor_points,
+                  "filename": filename, "cursor_type": cursor_name,
+                  "interpolation": interpolation,
+                  "cursor_offset": [cursor_offset[0], cursor_offset[1]],
+                  "background": background, "audio_file": audio_file,
+                  "operations": [], "total_time": total_time,
+                  "frames_per_second": fps}
+        for i, shape in enumerate(self.strokes):
+            if len(shape) == 0:
+                continue
+            # find coords for minimum bounding rectangle for a shape
+            min_x, min_y, max_x, max_y = self.get_bounding_box(shape)
+            # shape metadata
+            shape_js = {"strokes": [], "offset_x": min_x,
+                        "offset_y": min_y,
+                        "color": map(str, self.colors[i]),
+                        "start": self.timestamps[i]["start"],
+                        "end": self.timestamps[i]["end"]}
+            # translate coordinates to local space
+            stroke_arr = np.asarray(shape).swapaxes(0, 1)
+            stroke_arr[0] -= min_x
+            stroke_arr[1] -= min_y
+            stroke_arr = stroke_arr.swapaxes(0, 1)
+            shape_js["strokes"].append(stroke_arr.tolist())
+            output["operations"].append(shape_js)
+        with open("data.json", "w+") as data_file:
+            js.dump(output, data_file, indent=4, separators=(',', ': '))

@@ -18,11 +18,13 @@ def cli(ctx, debug):
 @cli.command()
 @click.option('--cursor', required=True, type=click.Path(exists=True))
 @click.option('--video', required=True, type=click.Path(exists=True))
+@click.option('--drawing-window', type=int, default=10)
+@click.option('--drawing-ratio', type=float, default=0.2)
 @click.pass_context
-def view(ctx, cursor, video):
+def view(ctx, cursor, video, drawing_window, drawing_ratio):
     debug = ctx.obj['DEBUG']
 
-    uvvid = UVVID()
+    uvvid = UVVID(drawing_window=drawing_window, drawing_ratio=drawing_ratio)
     template_frame = cv.imread(cursor, 0)
     cap = cv.VideoCapture(video)
     prev_frame = None
@@ -32,13 +34,15 @@ def view(ctx, cursor, video):
             break
 
         if prev_frame is not None:
-            uvvid.generate_strokes(frame, prev_frame, template_frame)
+            curr_pos = int(cap.get(cv.cv.CV_CAP_PROP_POS_MSEC))
+            uvvid.generate_strokes(frame, prev_frame, template_frame, curr_pos)
 
         cv.imshow('frame', frame)
         prev_frame = frame
         if cv.waitKey(1) & 0xFF == ord('q'):
             break
     if debug:
-        uvvid.__debug_points__(prev_frame, uvvid.get_strokes())
-        cv.imshow('debug points', prev_frame)
+        uvvid.generate_json("input.mp4", "cursor_1.png", "interpolation",
+                            "compressed_xyz.mp3", "background.png", (10, 11),
+                            "15", "75")
     cv.waitKey(0)
